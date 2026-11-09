@@ -19,6 +19,9 @@ form.addEventListener('submit',async e=>{
     input.value='';
     if(!result.ok)throw Error('network');
     if(!navigator.serviceWorker.controller)await new Promise((resolve,reject)=>{const timeout=setTimeout(()=>reject(Error('timeout')),10000);navigator.serviceWorker.addEventListener('controllerchange',()=>{clearTimeout(timeout);resolve();},{once:true});});
-    location.replace(location.pathname===base.pathname||location.pathname===base.pathname+'index.html'?base.href+location.hash:location.href);
+    // A same-URL replace with #route only navigates within this login document.
+    // Reload makes the unlocked worker serve the page, preserving its route or file.
+    if(location.pathname===base.pathname+'_gate/login.html')location.replace(base.href+location.hash);
+    else location.reload();
   }catch(error){status.textContent=error.message==='password'?'Пароль не подошёл. Попробуйте ещё раз.':error.message==='unsupported'?'Откройте сайт в современном браузере по HTTPS.':'Не удалось открыть сайт. Проверьте соединение и попробуйте ещё раз.';button.disabled=false;input.focus();}
 });
