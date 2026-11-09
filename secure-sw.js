@@ -1,6 +1,6 @@
 'use strict';
 const ROOT=new URL('./',self.location.href), encoder=new TextEncoder(), dbName='lab-encrypted-pages:'+ROOT.pathname;
-let configPromise,manifestPromise,sessionPromise;
+let configPromise,manifestPromise,sessionPromise,assistantPromise;
 const freshConfig=()=>fetch(new URL('_gate/config.json',ROOT),{cache:'no-store'}).then(r=>{if(!r.ok)throw Error('config');return r.json();});
 const config=()=>configPromise??=(freshConfig());
 async function storage(action,value){
@@ -27,9 +27,9 @@ self.addEventListener('message',event=>{
         const key=await crypto.subtle.importKey('raw',event.data.raw,{name:'AES-GCM'},false,['decrypt']);
         const manifest=await readManifest(key,c);
         const state={key,build:c.build,expires:Date.now()+12*60*60*1000};
-        await storage('put',state);configPromise=Promise.resolve(c);manifestPromise=Promise.resolve(manifest);sessionPromise=Promise.resolve(state);await self.clients.claim();reply({ok:true});
+        await storage('put',state);configPromise=Promise.resolve(c);manifestPromise=Promise.resolve(manifest);sessionPromise=Promise.resolve(state);assistantPromise=null;await self.clients.claim();reply({ok:true});
       }else if(event.data?.type==='lock'){
-        await storage('delete');sessionPromise=Promise.resolve(null);manifestPromise=null;reply({ok:true});
+        await storage('delete');sessionPromise=Promise.resolve(null);manifestPromise=null;assistantPromise=null;reply({ok:true});
         const clients=await self.clients.matchAll();for(const client of clients)client.postMessage({type:'locked'});
       }else if(event.data?.type==='status'){const s=await session();reply({expires:s?.expires||0});}
     }catch{reply({ok:false});}
@@ -43,16 +43,31 @@ self.addEventListener('fetch',event=>{
   event.respondWith((async()=>{
     const headers={'Cache-Control':'no-store','X-Content-Type-Options':'nosniff','Referrer-Policy':'no-referrer'};
     try{
-      if(event.request.mode==='navigate'){const latest=await freshConfig();const previous=await config();if(latest.build!==previous.build)manifestPromise=null;configPromise=Promise.resolve(latest);}
+      if(event.request.mode==='navigate'){const latest=await freshConfig();const previous=await config();if(latest.build!==previous.build){manifestPromise=null;assistantPromise=null;}configPromise=Promise.resolve(latest);}
       const s=await session();
       if(!s){
         if(event.request.mode==='navigate'){const r=await fetch(new URL('_gate/login.html',ROOT),{cache:'no-store'});return new Response(await r.text(),{headers:{...headers,'Content-Type':'text/html; charset=utf-8'}});}
         return new Response('Locked',{status:401,headers});
       }
-      if(path==='api/assistant/status')return Response.json({connected:false,mode:'search-only'},{headers});
-      if(path==='api/assistant')return Response.json({error:'На этой странице доступен поиск по материалам.',code:'not_connected'},{status:503,headers});
-      if(!['GET','HEAD'].includes(event.request.method))return new Response('Method not allowed',{status:405,headers});
       const c=await config(),manifest=await (manifestPromise??=readManifest(s.key,c));
+      if(path==='api/assistant/status'||path==='api/assistant'){
+        try{
+          const expectedMethod=path.endsWith('/status')?'GET':'POST';
+          if(event.request.method!==expectedMethod)return Response.json({error:'Метод недоступен.'},{status:405,headers});
+          const configPath='assets/assistant/runtime.json',entry=manifest.files[configPath];
+          if(!entry)return Response.json({connected:false,mode:'search-only',error:'Модель пока не подключена.'},{status:path.endsWith('/status')?200:503,headers});
+          const runtime=await (assistantPromise??=(async()=>{
+            const r=await fetch(new URL(entry.object,ROOT));if(!r.ok)throw Error('runtime');
+            return JSON.parse(new TextDecoder().decode(await decrypt(s.key,new Uint8Array(await r.arrayBuffer()),configPath)));
+          })());
+          const endpoint=new URL(runtime.endpoint);
+          if(endpoint.protocol!=='https:'||!endpoint.hostname.endsWith('.workers.dev')||endpoint.username||endpoint.password||!(/^[A-Za-z0-9_-]{43}$/).test(runtime.token))throw Error('runtime');
+          endpoint.pathname='/'+path;endpoint.search='';endpoint.hash='';
+          const response=await fetch(endpoint,{method:expectedMethod,mode:'cors',credentials:'omit',headers:{'Authorization':'Bearer '+runtime.token,'Content-Type':'application/json'},body:expectedMethod==='POST'?await event.request.text():undefined,signal:AbortSignal.timeout(55000)});
+          return new Response(await response.text(),{status:response.status,headers:{...headers,'Content-Type':'application/json; charset=utf-8'}});
+        }catch{assistantPromise=null;return Response.json({connected:false,error:'Модель временно недоступна. Разделы доступны по кнопкам.'},{status:503,headers});}
+      }
+      if(!['GET','HEAD'].includes(event.request.method))return new Response('Method not allowed',{status:405,headers});
       const item=manifest.files[path||'index.html'];
       if(!item)return new Response('Не найдено',{status:404,headers});
       const response=await fetch(new URL(item.object,ROOT));if(!response.ok)throw Error('asset');
