@@ -2,17 +2,39 @@
 const ROOT=new URL('./',self.location.href), encoder=new TextEncoder(), dbName='lab-encrypted-pages:'+ROOT.pathname;
 let configPromise,manifestPromise,sessionPromise,assistantPromise;
 const freshConfig=()=>fetch(new URL('_gate/config.json',ROOT),{cache:'no-store'}).then(r=>{if(!r.ok)throw Error('config');return r.json();});
-const config=()=>configPromise??=(freshConfig());
+const config=()=>configPromise??=freshConfig().catch(error=>{configPromise=null;throw error;});
+const keyScope=c=>`${c.version}:${c.salt}:${c.iterations}`;
 async function storage(action,value){
   const db=await new Promise((resolve,reject)=>{const r=indexedDB.open(dbName,1);r.onupgradeneeded=()=>r.result.createObjectStore('session');r.onsuccess=()=>resolve(r.result);r.onerror=()=>reject(r.error);});
   try{return await new Promise((resolve,reject)=>{const tx=db.transaction('session',action==='get'?'readonly':'readwrite'), store=tx.objectStore('session');const r=action==='get'?store.get('active'):action==='put'?store.put(value,'active'):store.delete('active');let result;r.onsuccess=()=>{result=r.result;};tx.oncomplete=()=>resolve(result);tx.onerror=()=>reject(tx.error);tx.onabort=()=>reject(tx.error);});}finally{db.close();}
 }
 const decrypt=(key,data,aad)=>crypto.subtle.decrypt({name:'AES-GCM',iv:data.slice(0,12),additionalData:encoder.encode(aad)},key,data.slice(12));
-async function readManifest(key,c){const r=await fetch(new URL(c.manifest,ROOT));if(!r.ok)throw Error('manifest');return JSON.parse(new TextDecoder().decode(await decrypt(key,new Uint8Array(await r.arrayBuffer()),'lab-pages-manifest-v1')));}
+async function readManifest(key,c){
+  const r=await fetch(new URL(c.manifest,ROOT));if(!r.ok)throw Error('manifest');
+  const bytes=new Uint8Array(await r.arrayBuffer());let plain;
+  try{plain=await decrypt(key,bytes,'lab-pages-manifest-v1');}catch{throw Error('session_key');}
+  return JSON.parse(new TextDecoder().decode(plain));
+}
 async function session(){
   const c=await config();const s=await (sessionPromise??=storage('get'));
-  if(!s||s.expires<=Date.now()||s.build!==c.build)return null;
+  if(!s||s.expires<=Date.now()||(s.keyScope&&s.keyScope!==keyScope(c)))return null;
   return s;
+}
+async function currentManifest(s,c){
+  const manifest=await (manifestPromise??=readManifest(s.key,c).catch(error=>{manifestPromise=null;throw error;}));
+  // Migrate a valid older session without extending its expiry or saving the password.
+  if(!s.keyScope){const state={key:s.key,keyScope:keyScope(c),expires:s.expires};await storage('put',state);sessionPromise=Promise.resolve(state);}
+  return manifest;
+}
+async function forgetSession(){await storage('delete');sessionPromise=Promise.resolve(null);manifestPromise=null;assistantPromise=null;}
+async function refreshConfig(){
+  const latest=await freshConfig(),previous=await config();
+  if(latest.build!==previous.build){manifestPromise=null;assistantPromise=null;}
+  configPromise=Promise.resolve(latest);return latest;
+}
+async function lockedResponse(request,headers){
+  if(request.mode==='navigate'){const r=await fetch(new URL('_gate/login.html',ROOT),{cache:'no-store'});return new Response(await r.text(),{headers:{...headers,'Content-Type':'text/html; charset=utf-8'}});}
+  return new Response('Locked',{status:401,headers});
 }
 self.addEventListener('install',e=>e.waitUntil(self.skipWaiting()));
 self.addEventListener('activate',e=>e.waitUntil(self.clients.claim()));
@@ -26,13 +48,17 @@ self.addEventListener('message',event=>{
         const c=await freshConfig();if(event.data.build!==c.build)throw Error('build');
         const key=await crypto.subtle.importKey('raw',event.data.raw,{name:'AES-GCM'},false,['decrypt']);
         const manifest=await readManifest(key,c);
-        const state={key,build:c.build,expires:Date.now()+12*60*60*1000};
+        const state={key,keyScope:keyScope(c),expires:Date.now()+12*60*60*1000};
         await storage('put',state);configPromise=Promise.resolve(c);manifestPromise=Promise.resolve(manifest);sessionPromise=Promise.resolve(state);assistantPromise=null;await self.clients.claim();reply({ok:true});
       }else if(event.data?.type==='lock'){
-        await storage('delete');sessionPromise=Promise.resolve(null);manifestPromise=null;assistantPromise=null;reply({ok:true});
+        await forgetSession();reply({ok:true});
         const clients=await self.clients.matchAll();for(const client of clients)client.postMessage({type:'locked'});
-      }else if(event.data?.type==='status'){const s=await session();reply({expires:s?.expires||0});}
-    }catch{reply({ok:false});}
+      }else if(event.data?.type==='status'){
+        const c=await refreshConfig(),s=await session();
+        if(s)await currentManifest(s,c);
+        reply({expires:s?.expires||0});
+      }
+    }catch(error){if(error.message==='session_key')await forgetSession();reply({ok:false,expires:0});}
   })());
 });
 self.addEventListener('fetch',event=>{
@@ -43,13 +69,10 @@ self.addEventListener('fetch',event=>{
   event.respondWith((async()=>{
     const headers={'Cache-Control':'no-store','X-Content-Type-Options':'nosniff','Referrer-Policy':'no-referrer'};
     try{
-      if(event.request.mode==='navigate'){const latest=await freshConfig();const previous=await config();if(latest.build!==previous.build){manifestPromise=null;assistantPromise=null;}configPromise=Promise.resolve(latest);}
+      if(event.request.mode==='navigate')await refreshConfig();
       const s=await session();
-      if(!s){
-        if(event.request.mode==='navigate'){const r=await fetch(new URL('_gate/login.html',ROOT),{cache:'no-store'});return new Response(await r.text(),{headers:{...headers,'Content-Type':'text/html; charset=utf-8'}});}
-        return new Response('Locked',{status:401,headers});
-      }
-      const c=await config(),manifest=await (manifestPromise??=readManifest(s.key,c));
+      if(!s)return lockedResponse(event.request,headers);
+      const c=await config(),manifest=await currentManifest(s,c);
       if(path==='api/assistant/status'||path==='api/assistant'){
         try{
           const expectedMethod=path.endsWith('/status')?'GET':'POST';
@@ -73,6 +96,9 @@ self.addEventListener('fetch',event=>{
       const response=await fetch(new URL(item.object,ROOT));if(!response.ok)throw Error('asset');
       const plain=await decrypt(s.key,new Uint8Array(await response.arrayBuffer()),path||'index.html');
       return new Response(event.request.method==='HEAD'?null:plain,{headers:{...headers,'Content-Type':item.type}});
-    }catch{return new Response('Не удалось открыть материал. Обновите страницу и войдите снова.',{status:503,headers});}
+    }catch(error){
+      if(error.message==='session_key'){await forgetSession();return lockedResponse(event.request,headers);}
+      return new Response('Не удалось загрузить материал. Обновите страницу.',{status:503,headers});
+    }
   })());
 });
