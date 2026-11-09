@@ -73,7 +73,7 @@ self.addEventListener('fetch',event=>{
       const s=await session();
       if(!s)return lockedResponse(event.request,headers);
       const c=await config(),manifest=await currentManifest(s,c);
-      if(path==='api/assistant/status'||path==='api/assistant'){
+      if(path==='api/assistant/status'||path==='api/assistant'||path==='api/search'){
         try{
           const expectedMethod=path.endsWith('/status')?'GET':'POST';
           if(event.request.method!==expectedMethod)return Response.json({error:'Метод недоступен.'},{status:405,headers});
