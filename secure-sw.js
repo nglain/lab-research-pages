@@ -73,9 +73,9 @@ self.addEventListener('fetch',event=>{
       const s=await session();
       if(!s)return lockedResponse(event.request,headers);
       const c=await config(),manifest=await currentManifest(s,c);
-      if(path==='api/assistant/status'||path==='api/assistant'||path==='api/search'){
+      if(path==='api/assistant/status'||path==='api/assistant'||path==='api/search'||path==='api/agents'){
         try{
-          const expectedMethod=path.endsWith('/status')?'GET':'POST';
+          const expectedMethod=path==='api/agents'&&event.request.method==='GET'?'GET':path.endsWith('/status')?'GET':'POST';
           if(event.request.method!==expectedMethod)return Response.json({error:'Метод недоступен.'},{status:405,headers});
           const configPath='assets/assistant/runtime.json',entry=manifest.files[configPath];
           if(!entry)return Response.json({connected:false,mode:'search-only',error:'Модель пока не подключена.'},{status:path.endsWith('/status')?200:503,headers});
@@ -85,7 +85,7 @@ self.addEventListener('fetch',event=>{
           })());
           const endpoint=new URL(runtime.endpoint);
           if(endpoint.protocol!=='https:'||!endpoint.hostname.endsWith('.workers.dev')||endpoint.username||endpoint.password||!(/^[A-Za-z0-9_-]{43}$/).test(runtime.token))throw Error('runtime');
-          endpoint.pathname='/'+path;endpoint.search='';endpoint.hash='';
+          endpoint.pathname='/'+path;endpoint.search=path==='api/agents'?url.search:'';endpoint.hash='';
           const response=await fetch(endpoint,{method:expectedMethod,mode:'cors',credentials:'omit',headers:{'Authorization':'Bearer '+runtime.token,'Content-Type':'application/json'},body:expectedMethod==='POST'?await event.request.text():undefined,signal:AbortSignal.timeout(55000)});
           return new Response(await response.text(),{status:response.status,headers:{...headers,'Content-Type':'application/json; charset=utf-8'}});
         }catch{assistantPromise=null;return Response.json({connected:false,error:'Модель временно недоступна. Разделы доступны по кнопкам.'},{status:503,headers});}
