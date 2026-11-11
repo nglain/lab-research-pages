@@ -74,7 +74,7 @@ self.addEventListener('fetch',event=>{
       if(!s)return lockedResponse(event.request,headers);
       const c=await config(),manifest=await currentManifest(s,c);
       // Protected API: assistant, semantic search, agent journal and the shared notebook share one login key.
-      const apiMethods=path==='api/assistant/status'?['GET']:path==='api/assistant'||path==='api/search'?['POST']:path==='api/agents'?['GET','POST']:path==='api/notes'?['GET','POST']:/^api\/notes\/[0-9a-f-]{36}$/.test(path)?['PUT']:null;
+      const apiMethods=path==='api/assistant/status'?['GET']:path==='api/assistant'||path==='api/search'?['POST']:path==='api/agents'?['GET','POST']:path==='api/notes'?['GET','POST']:/^api\/notes\/[0-9a-f-]{36}$/.test(path)?['PUT']:/^api\/notes\/[0-9a-f-]{36}\/comments$/.test(path)?['POST']:/^api\/notes\/[0-9a-f-]{36}\/comments\/[0-9a-f-]{36}$/.test(path)?['PUT','DELETE']:null;
       if(apiMethods){
         try{
           const expectedMethod=event.request.method;
@@ -88,7 +88,7 @@ self.addEventListener('fetch',event=>{
           const endpoint=new URL(runtime.endpoint);
           if(endpoint.protocol!=='https:'||!endpoint.hostname.endsWith('.workers.dev')||endpoint.username||endpoint.password||!(/^[A-Za-z0-9_-]{43}$/).test(runtime.token))throw Error('runtime');
           endpoint.pathname='/'+path;endpoint.search=path==='api/agents'?url.search:'';endpoint.hash='';
-          const response=await fetch(endpoint,{method:expectedMethod,mode:'cors',credentials:'omit',headers:{'Authorization':'Bearer '+runtime.token,'Content-Type':'application/json'},body:expectedMethod==='GET'?undefined:await event.request.text(),signal:AbortSignal.timeout(55000)});
+          const response=await fetch(endpoint,{method:expectedMethod,mode:'cors',credentials:'omit',headers:{'Authorization':'Bearer '+runtime.token,'Content-Type':'application/json'},body:['GET','DELETE'].includes(expectedMethod)?undefined:await event.request.text(),signal:AbortSignal.timeout(55000)});
           return new Response(await response.text(),{status:response.status,headers:{...headers,'Content-Type':'application/json; charset=utf-8'}});
         }catch{assistantPromise=null;return Response.json({connected:false,error:'Модель временно недоступна. Разделы доступны по кнопкам.'},{status:503,headers});}
       }
